@@ -1535,6 +1535,61 @@ out:
     return status;
 }
 
+ucs_status_t ucp_worker_wait_timed(ucp_worker_h worker, int timeout)
+{
+    ucp_worker_iface_t *wiface;
+    struct pollfd *pfd;
+    ucs_status_t status;
+    nfds_t nfds;
+    int ret;
+
+    ucs_trace_func("worker %p", worker);
+
+    UCP_THREAD_CS_ENTER_CONDITIONAL(&worker->mt_lock);
+
+    status = ucp_worker_arm(worker);
+    if (status == UCS_ERR_BUSY) { /* if UCS_ERR_BUSY returned - no poll() must called */
+        status = UCS_OK;
+        goto out;
+    } else if (status != UCS_OK) {
+        goto out;
+    }
+
+    if (worker->flags & UCP_WORKER_FLAG_EXTERNAL_EVENT_FD) {
+        pfd = ucs_alloca(sizeof(*pfd) * worker->context->num_tls);
+        nfds = 0;
+        ucs_list_for_each(wiface, &worker->arm_ifaces, arm_list) {
+            pfd[nfds].fd     = wiface->event_fd;
+            pfd[nfds].events = POLLIN;
+            ++nfds;
+        }
+    } else {
+        pfd = ucs_alloca(sizeof(*pfd));
+        pfd->fd      = worker->epfd;
+        pfd->events  = POLLIN;
+        nfds         = 1;
+    }
+
+    for (;;) {
+        ret = poll(pfd, nfds, timeout);
+        if (ret >= 0) {
+            ucs_assertv(ret <= 1, "ret=%d", ret);
+            status = UCS_OK;
+            goto out;
+        } else {
+            if (errno != EINTR) {
+                ucs_error("poll(nfds=%d) returned %d: %m", (int)nfds, ret);
+                status = UCS_ERR_IO_ERROR;
+                goto out;
+            }
+        }
+    }
+
+out:
+    UCP_THREAD_CS_EXIT_CONDITIONAL(&worker->mt_lock);
+    return status;
+}
+
 ucs_status_t ucp_worker_signal(ucp_worker_h worker)
 {
     ucs_status_t status;
